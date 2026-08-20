@@ -12,7 +12,7 @@ it writes is filed in your name, exactly as if you had clicked it yourself.
 
 ## What it can do
 
-Thirteen tools. Nine read, four write, and every write shows you exactly what it
+Fourteen tools. Nine read, five write, and every write shows you exactly what it
 is about to do before it does it.
 
 ### Reading
