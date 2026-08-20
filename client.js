@@ -211,6 +211,11 @@ async function getCandidate(candidateId) {
     tags: c.tags || [],
     adminUrl: c.adminapp_url || null,
     createdAt: c.created_at,
+    // Whether a CV is on file, and its filename. Needed because promoting a
+    // document to the CV slot REPLACES whatever is there — anything about to do
+    // that has to be able to see it first.
+    cvUrl: c.cv_original_url || null,
+    cvFilename: c.cv_original_url ? String(c.cv_original_url).split('?')[0].split('/').pop() : null,
     placements: (c.placements || []).map((p) => ({
       placementId: p.id,
       offerId: p.offer_id,
@@ -628,7 +633,19 @@ async function submitEvaluation({ candidate, offer, stage, rating, ratingNote })
 // match — filing an evaluation on the wrong person is the failure that matters.
 
 async function resolveOffer(offerTitleOrId) {
-  if (/^\d+$/.test(String(offerTitleOrId))) return { id: Number(offerTitleOrId) };
+  // A numeric id needs no lookup to be USABLE, but returning a bare {id} left
+  // every caller's message reading `on "undefined"` — the id path and the title
+  // path handed back different shapes. Fill the title in when we can, and fall
+  // back to the bare id if the listing fails, so passing an id never becomes
+  // the fragile way to name an offer.
+  if (/^\d+$/.test(String(offerTitleOrId))) {
+    const id = Number(offerTitleOrId);
+    try {
+      const found = (await listOffers({ limit: 200 })).find((o) => o.id === id);
+      if (found) return found;
+    } catch (e) { /* id alone is enough to work with */ }
+    return { id, title: `offer ${id}` };
+  }
   const wanted = String(offerTitleOrId).trim().toLowerCase();
   const offers = await listOffers({ limit: 100 });
   const exact = offers.filter((o) => o.title.toLowerCase() === wanted);
@@ -691,12 +708,15 @@ async function resolveStage(offerId, stageNameOrId) {
 
 // ── Candidate creation ─────────────────────────────────────────────────────
 
-// INTERNAL ONLY, and not exported as a tool. Creating someone on an offer always
-// drops them in "Applied" — the create endpoint takes no stage — so a person you
-// sourced would be filed among the applicants and inflate that count. This puts
-// them where they belong immediately after creation. It is not a general
-// stage-move capability: nothing outside createCandidate may call it, so the
-// server still cannot advance or reject anybody.
+// The raw stage write. Two callers: createCandidate (which must correct the
+// landing stage, because the create endpoint takes no stage and drops everyone
+// in "Applied", inflating the applicant count with people we went looking for)
+// and moveStage below.
+//
+// It moves a placement along the pipeline and nothing else. Disqualifying,
+// requalifying and deleting are separate endpoints this token can also reach,
+// and they stay unimplemented on purpose: advancing somebody is a bookkeeping
+// move, whereas rejecting them is a decision a person makes in the UI.
 async function placeInStage(placementId, stageId) {
   for (const body of [{ placement: { stage_id: Number(stageId) } }, { stage_id: Number(stageId) }]) {
     try {
@@ -707,6 +727,62 @@ async function placeInStage(placementId, stageId) {
     }
   }
   return false;
+}
+
+// Move an existing candidate into another stage on ONE of their offers.
+//
+// Scoped to an offer because a candidate can sit on several: moving "them"
+// without saying which role is meaningless, and picking one for the caller
+// would eventually move the wrong pipeline.
+//
+// Refuses a disqualified placement. Changing the stage of someone who was
+// turned down would quietly requalify them — reversing a human's rejection as
+// a side effect of a stage move — so that has to be done deliberately in the UI.
+async function moveStage({ candidate, offer, stage }) {
+  const cand = await resolveCandidate(candidate);
+  const off = await resolveOffer(offer);
+  const full = await getCandidate(cand.id);
+  const placement = (full.placements || []).find((p) => p.offerId === off.id);
+  if (!placement) {
+    const on = (full.placements || []).map((p) => p.offerId).join(', ') || 'none';
+    throw new RecruiteeError(
+      `${full.name} holds no placement on "${off.title}" (${off.id}), so there is no pipeline to move them along. They are on: ${on}.`
+    );
+  }
+  if (placement.disqualifiedAt) {
+    throw new RecruiteeError(
+      `${full.name} was disqualified on "${off.title}"` +
+      (placement.disqualifyReason ? ` (${placement.disqualifyReason})` : '') +
+      '. Moving them would requalify them, which is a decision to make in Tellent, not a side effect of a stage move.'
+    );
+  }
+
+  const target = await resolveStage(off.id, stage);
+  const { stages } = await getStages(off.id);
+  const from = stages.find((x) => x.id === placement.stageId) || null;
+  if (placement.stageId === target.id) {
+    return {
+      candidateId: full.id, candidate: full.name, offerId: off.id, offer: off.title,
+      from: target.name, stage: target.name, stageId: target.id,
+      unchanged: true, verified: true,
+    };
+  }
+
+  const moved = await placeInStage(placement.placementId, target.id);
+  // Verified by re-reading rather than trusting the PATCH: placeInStage probes
+  // two body shapes and swallows 4xx on the first, so a "true" is weaker
+  // evidence than the candidate's own record.
+  const after = await getCandidate(cand.id);
+  const now = (after.placements || []).find((p) => p.offerId === off.id);
+  const landed = now?.stageId === target.id;
+  return {
+    candidateId: full.id, candidate: full.name, offerId: off.id, offer: off.title,
+    from: from?.name ?? null, stage: landed ? target.name : (stages.find((x) => x.id === now?.stageId)?.name ?? null),
+    stageId: now?.stageId ?? null,
+    requested: target.name,
+    verified: landed,
+    ...(landed ? {} : { warning: `The move was not applied${moved ? ' despite the API accepting it' : ''} — they are still in "${from?.name ?? 'their previous stage'}". Move them by hand in Tellent.` }),
+  };
 }
 
 // Create straight onto the offer, then land them in the right stage.
@@ -759,10 +835,29 @@ async function createCandidate({
 // the field named `attachment[file]` works and returns 201 — found by probing.
 // The field name matters: bare `file` 500s, and passing candidate_id only as a
 // query parameter creates an ORPHAN attachment that is never linked to anyone.
-async function uploadAttachment({ candidateId, filePath, asCv = false }) {
+async function uploadAttachment({ candidateId, filePath, asCv = false, replaceCv = false }) {
   const fsp = require('node:fs/promises');
   const stat = await fsp.stat(filePath).catch(() => null);
   if (!stat || !stat.isFile()) throw new RecruiteeError(`No file at ${filePath}.`);
+
+  // set_as_cv REPLACES the CV rather than adding one, demoting whatever was
+  // there to a plain attachment. Found the hard way: promoting a generated
+  // profile onto a candidate who already had a CV silently pushed out the
+  // richer export a recruiter had put there by hand, and the only trace was an
+  // extra row in the attachments list. A CV on file is somebody's decision.
+  let existingCv = null;
+  if (asCv) {
+    const back = await api('GET', `/candidates/${Number(candidateId)}`).catch(() => null);
+    const cand = back?.candidate || {};
+    existingCv = cand.cv_original_url ? String(cand.cv_original_url).split('?')[0].split('/').pop() : null;
+    if (existingCv && !replaceCv) {
+      throw new RecruiteeError(
+        `${cand.name || 'This candidate'} already has a CV on file (${existingCv}). Setting another ` +
+        'would replace it and demote theirs to a plain attachment. Attach alongside it with asCv ' +
+        'false, or pass replaceCv true if the existing one really should be replaced.'
+      );
+    }
+  }
 
   const token = readToken();
   if (!token) throw new RecruiteeError('No Recruitee API token.');
@@ -811,6 +906,7 @@ async function uploadAttachment({ candidateId, filePath, asCv = false }) {
     setAsCv,
     verified: confirmed,
     storedAs: landedAs,
+    ...(existingCv ? { replacedCv: existingCv, replacedCvNote: `Their previous CV (${existingCv}) is now a plain attachment, not deleted.` } : {}),
     ...(confirmed ? {} : {
       warning: asCv
         ? 'The upload was accepted but the candidate still has no CV on file. Do not report it as attached.'
@@ -854,6 +950,6 @@ module.exports = {
   companyId, readToken, writeToken, readConfig, TOKEN_PATH,
   listOffers, getStages, offerCandidates, getCandidate, searchCandidates, sourceCandidates,
   getRatingScale, getEvaluations, submitEvaluation,
-  createCandidate, addNote, getNotes, whoami, toRecruiteeNote,
+  createCandidate, moveStage, addNote, getNotes, whoami, toRecruiteeNote,
   resolveOffer, resolveCandidate, resolveStage, uploadAttachment,
 };

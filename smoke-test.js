@@ -56,15 +56,37 @@ async function main() {
     const tools = list.result?.tools || [];
     check('tools/list', tools.length > 0, `${tools.length} tools`);
 
-    // The safety property that matters most: no tool may exist that moves,
-    // rejects or deletes a candidate. Assert it, don't assume it.
-    const forbidden = tools.filter((t) => /change_stage|move|disqualif|reject|delete|destroy|requalif|anonymi|conceal/i.test(t.name));
+    // The safety property that matters most: no tool may REJECT or REMOVE a
+    // candidate. Assert it, don't assume it.
+    //
+    // Stage moves used to be on this list and are now deliberately allowed
+    // (rt_set_stage), because advancing somebody is bookkeeping, not a
+    // judgement. The line moved to disqualification.
+    const forbidden = tools.filter((t) => /disqualif|reject|delete|destroy|requalif|anonymi|conceal/i.test(t.name));
     check('no destructive tools exposed', forbidden.length === 0, forbidden.map((t) => t.name).join(', ') || 'none');
 
-    // Every write must advertise the two-call gate.
-    const writes = tools.filter((t) => /create|submit|add_note|attach/.test(t.name));
+    // A stage mover is allowed to exist, but only one that cannot requalify:
+    // changing the stage of a disqualified placement would reverse a human's
+    // rejection as a side effect. The refusal lives in client.moveStage, so
+    // assert it at the source rather than trusting the description.
+    const mover = tools.find((t) => t.name === 'rt_set_stage');
+    if (mover) {
+      const clientSrc = require('node:fs').readFileSync(path.join(__dirname, 'client.js'), 'utf8');
+      check('stage moves refuse a disqualified placement',
+        /disqualifiedAt[\s\S]{0,400}?requalify/.test(clientSrc),
+        'client.moveStage must throw on a disqualified placement');
+      check('stage moves are scoped to one offer',
+        !!mover.inputSchema?.required?.includes('offer'),
+        'a candidate can sit on several pipelines; moving "them" must name which');
+    }
+
+    // Every write must advertise the two-call gate. Derived from the schema —
+    // a name-pattern list silently stops covering each new write tool.
+    const READS = /^rt_(list_offers|get_stages|offer_candidates|get_candidate|search_candidates|source_candidates|get_rating_scale|get_evaluations|get_notes)$/;
+    const writes = tools.filter((t) => !READS.test(t.name));
     const ungated = writes.filter((t) => !t.inputSchema?.properties?.confirm);
-    check('every write has a confirm gate', ungated.length === 0, `${writes.length} writes, ${ungated.length} ungated`);
+    check('every write has a confirm gate', ungated.length === 0,
+      ungated.length ? `ungated: ${ungated.map((t) => t.name).join(', ')}` : `${writes.length} writes, 0 ungated`);
 
     rpc(child, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'rt_list_offers', arguments: { limit: 3 } } });
     const call = await wait(3);

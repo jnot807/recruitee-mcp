@@ -6,10 +6,16 @@
 // warm — just a fetch wrapper. The token acts as the person who generated it,
 // which is why every install is one recruiter's own token. See client.js.
 //
-// WHAT IT DELIBERATELY CANNOT DO: move anyone between stages, disqualify,
-// requalify, delete or anonymise. Those endpoints exist and this token has the
-// permissions for all of them — which is the reason they are not implemented.
-// Rejecting a candidate is a decision a person makes in the UI.
+// WHAT IT DELIBERATELY CANNOT DO: disqualify, requalify, delete or anonymise.
+// Those endpoints exist and this token has the permissions for all of them —
+// which is the reason they are not implemented. Rejecting a candidate is a
+// decision a person makes in the UI.
+//
+// Stage moves ARE implemented (rt_set_stage), because advancing somebody is
+// bookkeeping rather than a judgement, and a pipeline that cannot be advanced
+// from here drifts out of step with wherever else it is tracked. The line is
+// drawn at disqualification, and rt_set_stage refuses a disqualified placement
+// so a move can never requalify anyone by side effect.
 //
 // Modes:
 //   node server.js --set-token <token> <company>   store the credentials (0600)
@@ -297,11 +303,40 @@ async function runServer() {
       },
     },
     {
+      name: 'rt_set_stage',
+      description:
+        'Move an existing candidate into another pipeline stage on ONE of their roles — to advance ' +
+        'them, or to mirror a move already made wherever your pipeline is tracked. Scoped to an offer ' +
+        'because a candidate can sit on several pipelines at once.\n\n' +
+        'Call rt_get_stages first if you do not know the offer\'s stage names; an unknown name is ' +
+        'refused and the real ones are listed back. If you are mirroring a move from another system, ' +
+        'do not assume the two name stages the same way — ask which stage is meant rather than ' +
+        'picking the nearest word.\n\n' +
+        'THIS IS NOT A REJECTION TOOL. It cannot disqualify anyone, and it refuses to move a ' +
+        'candidate who has already been disqualified, because that would requalify them. Only move ' +
+        'somebody because a person moved them or told you to — never because a meeting was booked, ' +
+        'a score looked good, or the pipeline seemed stale.\n\n' +
+        'Two-call gate: preview, then confirm. The move is verified by re-reading the candidate ' +
+        'afterwards; if it did not land, that is reported rather than claimed as done.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          candidate: { type: 'string', description: 'Full name, or a candidate id.' },
+          offer: { type: 'string', description: 'Role title or offer id — which pipeline to move them along.' },
+          stage: { type: 'string', description: 'Target stage name (or id) on that offer, e.g. "P&C Interview".' },
+          confirm: { type: 'boolean' },
+        },
+        required: ['candidate', 'offer', 'stage'],
+      },
+    },
+    {
       name: 'rt_attach_file',
       description:
         'Attach a local file to an existing candidate — a CV, or a summary document. ' +
         'Set asCv to make it their CV rather than a plain ' +
         'attachment; a record with no CV shows "No CV or resume yet" in Tellent.\n\n' +
+        'Setting a file as the CV REPLACES any CV already on file, demoting theirs to a plain ' +
+        'attachment — so that is refused unless you pass replaceCv.\n\n' +
         'Only ever attach a file the user named. Never go looking for one, and never substitute a ' +
         'different file if the named one is missing. Two-call gate: preview, then confirm.\n\n' +
         'The upload is verified against the candidate afterwards; if it comes back unlinked, say so ' +
@@ -312,6 +347,7 @@ async function runServer() {
           candidate: { type: 'string', description: 'Full name, or a candidate id.' },
           filePath: { type: 'string', description: 'Absolute path to the local file.' },
           asCv: { type: 'boolean', description: 'Make it the candidate\'s CV. Default false.' },
+          replaceCv: { type: 'boolean', description: 'Allow replacing a CV already on file. Default false — setting a CV REPLACES the existing one and demotes it to a plain attachment, so that needs saying out loud.' },
           confirm: { type: 'boolean' },
         },
         required: ['candidate', 'filePath'],
@@ -511,6 +547,71 @@ async function runServer() {
           rating: args.rating, ratingNote: args.ratingNote,
         });
         return ok({ status: result.verified ? 'written' : 'written_unverified', evaluation: result });
+      }
+
+      if (name === 'rt_set_stage') {
+        if (!String(args.candidate || '').trim() || !String(args.offer || '').trim() || !String(args.stage || '').trim()) {
+          return fail('candidate, offer and stage are all required.');
+        }
+        if (args.confirm !== true) {
+          const cand = await client.resolveCandidate(args.candidate);
+          const off = await client.resolveOffer(args.offer);
+          const full = await client.getCandidate(cand.id);
+          const placement = (full.placements || []).find((p) => p.offerId === off.id);
+          const { stages } = await client.getStages(off.id);
+          const from = placement ? stages.find((x) => x.id === placement.stageId)?.name ?? null : null;
+          // Resolved in the preview so a bad stage name is caught before the
+          // user is asked to approve a move that would only fail on confirm.
+          let target = null, stageError = null;
+          try { target = (await client.resolveStage(off.id, args.stage)).name; }
+          catch (e) { stageError = e.message; }
+          return staged('stage move', {
+            candidate: `${full.name} (${full.id})`,
+            offer: `${off.title} (${off.id})`,
+            from,
+            to: target,
+            stages: stages.map((x) => x.name),
+            ...(stageError ? { blocker: stageError } : {}),
+            ...(placement ? {} : { blocker: `${full.name} holds no placement on "${off.title}", so there is no pipeline to move them along.` }),
+            ...(placement?.disqualifiedAt ? { blocker: `${full.name} was disqualified on this role${placement.disqualifyReason ? ` (${placement.disqualifyReason})` : ''}. Moving them would requalify them — do that in Tellent, deliberately.` } : {}),
+            ...(target && from === target ? { note: `Already in "${target}" — confirming would change nothing.` } : {}),
+          });
+        }
+        const res = await client.moveStage({ candidate: args.candidate, offer: args.offer, stage: args.stage });
+        return ok({ status: res.unchanged ? 'unchanged' : (res.verified ? 'moved' : 'move_unverified'), ...res });
+      }
+
+      if (name === 'rt_attach_file') {
+        if (!String(args.candidate || '').trim() || !String(args.filePath || '').trim()) {
+          return fail('candidate and filePath are required.');
+        }
+        const cand = await client.resolveCandidate(args.candidate);
+        if (args.confirm !== true) {
+          const fs = require('node:fs');
+          const exists = fs.existsSync(args.filePath);
+          // Re-read in full: resolveCandidate returns a search hit for a NAME,
+          // which carries no cv field, so the CV warning would silently vanish
+          // on exactly the lookups people actually use.
+          const full = await client.getCandidate(cand.id);
+          return staged('attachment', {
+            candidate: `${full.name} (${full.id})`,
+            filePath: args.filePath,
+            fileExists: exists,
+            sizeBytes: exists ? fs.statSync(args.filePath).size : null,
+            asCv: args.asCv === true,
+            ...(args.asCv === true && full.cvFilename && args.replaceCv !== true
+              ? { blocker: `${full.name} already has a CV on file (${full.cvFilename}). Setting this as their CV would replace it. Use asCv false to attach alongside, or replaceCv true only if the user says so.` }
+              : {}),
+            ...(args.asCv === true && full.cvFilename && args.replaceCv === true
+              ? { warning: `This REPLACES their existing CV (${full.cvFilename}), which becomes a plain attachment.` }
+              : {}),
+            ...(exists ? {} : { blocker: 'That file does not exist. Do not substitute another one.' }),
+          });
+        }
+        const res = await client.uploadAttachment({
+          candidateId: cand.id, filePath: args.filePath, asCv: args.asCv === true, replaceCv: args.replaceCv === true,
+        });
+        return ok({ status: res.verified ? 'attached' : 'upload_unverified', candidate: cand.name, attachment: res });
       }
 
       if (name === 'rt_attach_file') {

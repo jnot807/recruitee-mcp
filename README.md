@@ -39,6 +39,7 @@ question three times, and a flat list cannot tell those answers apart.
 | --- | --- |
 | `rt_create_candidate` | Creates a person and places them on a role in one step. Takes email, phone, links, tags, a cover-letter block, where they came from, and a file to attach. Lands them in **Sourced** by default. |
 | `rt_submit_evaluation` | Writes the thumbs rating and your reasoning onto a candidate for one role — the Evaluation tab of their profile. |
+| `rt_set_stage` | Moves a candidate to another stage on one of their offers. Refuses a disqualified placement, so it cannot requalify anybody. |
 | `rt_attach_file` | Attaches a local file to an existing candidate, optionally making it their CV. |
 | `rt_add_note` | Adds a note, public or private. For context that is not a verdict — a call recap, sourcing rationale, a summary. |
 
@@ -219,14 +220,26 @@ generated it — the documentation is explicit that it can "perform the same
 actions as in the web or mobile application in the name of that user". There is
 no read-only token to issue.
 
-So the restraint lives in this code instead. Moving a candidate between stages,
-disqualifying, requalifying, deleting, concealing and anonymising are all real,
-documented endpoints that this server **does not implement**. Not hidden behind
-a flag, not commented out — absent, so no instruction, prompt or bug can reach
-them. Rejecting a candidate stays a decision you make in the UI.
+So the restraint lives in this code instead. Disqualifying, requalifying,
+deleting, concealing and anonymising are all real, documented endpoints that
+this server **does not implement**. Not hidden behind a flag, not commented out
+— absent, so no instruction, prompt or bug can reach them. Rejecting a candidate
+stays a decision you make in the UI.
 
-`npm run smoke` asserts both properties on every run: that no destructive tool
-is exposed, and that every write advertises its confirm gate.
+**Stage moves are the one thing that is allowed.** `rt_set_stage` advances a
+candidate along one offer's pipeline, because that is bookkeeping rather than a
+judgement, and a pipeline you cannot advance from here drifts out of step with
+wherever else you track it. The line is drawn at disqualification and it is
+enforced, not just documented: the move **refuses a placement that has already
+been disqualified**, since changing its stage would requalify the person —
+reversing somebody's rejection as a side effect of a bookkeeping call.
+
+`npm run smoke` asserts these properties on every run: that no destructive tool
+is exposed, that the stage mover refuses a disqualified placement and is scoped
+to one offer, and that every write advertises its confirm gate. That last check
+derives writes from the tool schemas rather than from a list of name patterns —
+the earlier version silently stopped covering new tools, and waved `rt_set_stage`
+through without testing it at all.
 
 ---
 
@@ -235,9 +248,16 @@ is exposed, and that every write advertises its confirm gate.
 **New candidates land in "Sourced".** Recruitee's create endpoint always drops
 people in "Applied", which would file everyone you sourced among the genuine
 applicants, so they are moved immediately after creation and you are told if
-that did not take. That is the only stage change this server can make, it
-happens inside creation, and it is not exposed as a tool — so it still cannot
-advance or reject anybody.
+that did not take. Pass `stage` to override it — `"Applied"` for somebody who
+genuinely applied, or any later stage for someone already in process. To move
+them afterwards, use `rt_set_stage`.
+
+**Setting a CV replaces the one already there.** Recruitee's `set_as_cv` does
+not add a CV, it swaps the slot and demotes the previous file to a plain
+attachment. `rt_attach_file` therefore refuses to set a CV on a candidate who
+already has one unless you pass `replaceCv` — a CV on file is somebody's
+decision, and the only trace of overwriting it is an extra row in the
+attachments list.
 
 **Evaluations are filed under you.** They appear as "You evaluated",
 indistinguishable from one clicked by hand. Never write one for a conversation
