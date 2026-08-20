@@ -12,7 +12,7 @@ it writes is filed in your name, exactly as if you had clicked it yourself.
 
 ## What it can do
 
-Twelve tools. Eight read, four write, and every write shows you exactly what it
+Thirteen tools. Nine read, four write, and every write shows you exactly what it
 is about to do before it does it.
 
 ### Reading
@@ -23,7 +23,8 @@ is about to do before it does it.
 | `rt_get_stages` | One role's pipeline stages, with a live count in each. |
 | `rt_offer_candidates` | Everyone on one role — their stage, whether they were disqualified, and any ratings. Genuinely scoped to that role, not the whole company. |
 | `rt_get_candidate` | A full record: contact details, tags, every role they sit on, and their application answers. |
-| `rt_search_candidates` | Find someone by name or keyword across the company. |
+| `rt_search_candidates` | Find one person by name. |
+| `rt_source_candidates` | Search your whole database, CV text included — see below. |
 | `rt_get_rating_scale` | The rating scale your account is configured for, so a verdict is never guessed at. |
 | `rt_get_evaluations` | Every evaluation on a candidate — rating, note, stage, reviewer and date — flattened into one list. |
 | `rt_get_notes` | Notes already on a candidate, newest first. |
@@ -68,6 +69,59 @@ the scale does not have is rejected rather than quietly turned into a
 neighbour.
 
 ---
+
+## Sourcing from your own database
+
+`rt_source_candidates` runs the same search the Candidates screen runs, which is a
+different thing from `rt_search_candidates`: that one matches names, this one
+matches **everything, CV text included**, with boolean operators.
+
+```
+query: "renewals AND churn"
+query: "(SaaS OR B2B) AND \"net revenue retention\" NOT \"vice president\""
+```
+
+That matters because job titles are inconsistent between companies, and what
+somebody actually did is written in their CV. Searching for the evidence beats
+searching for the title.
+
+Filters combine: `offer`, `excludeOffer`, `jobStatus`, `stage`, `status`, `tags`,
+`sources`. `excludeOffer` is the one that makes it a sourcing tool rather than a
+search box — it keeps the people already on a role out of the results when you are
+topping it up.
+
+Every result carries **why it matched** — the actual sentences, with the HTML
+stripped — and **every role the person is already on**, with the stage and, where
+they were turned down, the reason. That last part is not decoration: most of an
+established ATS was rejected once. "Wrong location" two years ago may not apply
+today; "failed the assessment" still does. Nobody should be presented as a fresh
+find without it.
+
+### Why the filter building looks paranoid
+
+`/search/new/candidates` silently ignores anything it does not recognise and
+returns an unfiltered result rather than an error. Four ways to get a plausible,
+badly wrong answer, all confirmed against a live account:
+
+| Mistake | What the API does |
+| --- | --- |
+| Unknown entity name | returns the entire database |
+| `nin` instead of `not_in` | returns the entire database |
+| Unknown sort | silently falls back to relevance |
+| Two filter objects for the same entity | the second **replaces** the first |
+
+That last one is the nastiest: a role plus a job status sent as two objects returns
+everyone with that job status, and nothing anywhere says the role filter was
+dropped. So every constraint on an entity is merged into a single object, and no
+caller-supplied key ever reaches the API — names are mapped onto a vocabulary
+verified against the live API, and anything outside it throws.
+
+A wrong *value* is safe by contrast: it returns zero, which is obviously wrong to
+whoever reads it. A zero result also comes back with your real stage names
+attached, so a mistyped stage is distinguishable from an empty one.
+
+`node sourcing-test.js` checks all of it, including that the client refuses each of
+the four mistakes above.
 
 ## Setup
 
@@ -239,6 +293,7 @@ machine, and your token never leaves it.
 
 ```bash
 npm run smoke     # self-check: tool list, no destructive tools, confirm gates, one live read
+npm run sourcing  # 20 checks on the search filters, including the four silent-failure modes
 npm run check     # prove the token
 npm start         # run the server directly (it speaks JSON-RPC on stdin/stdout)
 ```

@@ -2,16 +2,27 @@
   "name": "recruitee-mcp",
   "version": "1.0.0",
   "private": true,
-  "description": "Local stdio MCP server for Recruitee/Tellent. Reads offers, pipeline stages and candidates scoped per offer, creates candidates onto a role, and writes interview evaluations — using your own personal API token, so everything is filed in your name.",
+  "description": "Local stdio MCP server for Recruitee/Tellent. Search the whole candidate database including CV text, read offers, stages and candidates scoped per offer, create candidates onto a role, and write interview evaluations — using your own personal API token, so everything is filed in your name.",
   "type": "commonjs",
-  "bin": { "recruitee-mcp": "server.js" },
-  "files": ["server.js", "client.js", "smoke-test.js", "README.md"],
-  "engines": { "node": ">=18" },
+  "bin": {
+    "recruitee-mcp": "server.js"
+  },
+  "files": [
+    "server.js",
+    "client.js",
+    "smoke-test.js",
+    "sourcing-test.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "set-token": "node server.js --set-token",
     "check": "node server.js --check",
     "smoke": "node smoke-test.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "sourcing": "node sourcing-test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

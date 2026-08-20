@@ -140,6 +140,44 @@ async function runServer() {
       },
     },
     {
+      name: 'rt_source_candidates',
+      description:
+        'SEARCH THE WHOLE CANDIDATE DATABASE — every person who ever applied or was added, ' +
+        'not just one role. This is the sourcing tool: use it to find people already in the ATS ' +
+        'before going out to LinkedIn, because someone who applied to a similar role last year is ' +
+        'the cheapest good candidate there is.\n\n' +
+        'IT SEARCHES CV TEXT, not just names and titles. `query` takes boolean operators exactly ' +
+        'as the Recruitee search bar does: "renewals AND churn", "(SaaS OR B2B) AND expansion". ' +
+        'Every result carries whyMatched — the actual sentences that matched — so a coincidental ' +
+        'hit can be dismissed without opening the profile.\n\n' +
+        'SEARCH FOR THE EVIDENCE, NOT THE JOB TITLE. Titles are inconsistent between companies; ' +
+        'what someone DID is written in their CV. Prefer "quota AND renewals" over "Account ' +
+        'Manager", and run several narrow searches rather than one broad one.\n\n' +
+        'MOST OF THIS DATABASE WAS REJECTED ONCE. Every result lists each role the person sits ' +
+        'on with its stage and, where they were turned down, the reason. Read it before you ' +
+        'suggest anybody: "wrong location" two years ago may not apply now, "failed the ' +
+        'assessment" still does. Never present someone as a fresh find without saying they have ' +
+        'been through the process before, and for which role.\n\n' +
+        'excludeOffer keeps people already on a role out of the results, which is what you want ' +
+        'when topping one up. Combine filters freely — they AND together.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Full-text, boolean, across CV and profile. e.g. "renewals AND churn".' },
+          offer: { type: 'string', description: 'Limit to people on this role (title or id).' },
+          excludeOffer: { type: 'string', description: 'Exclude people already on this role (title or id).' },
+          jobStatus: { type: 'string', description: 'published | archived — the status of the role they are on.' },
+          stage: { type: 'string', description: 'Pipeline stage name, e.g. "Applied". A stage this company does not have returns nothing and lists the real ones.' },
+          status: { type: 'string', description: 'qualified | disqualified | new | viewed | overdue.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Tag names. An unknown tag throws and lists the real ones.' },
+          sources: { type: 'array', items: { type: 'string' }, description: 'Source names, e.g. "linkedin.com".' },
+          limit: { type: 'number', description: 'Max 100, default 25.' },
+          page: { type: 'number', description: 'For paging past the first set.' },
+          sortBy: { type: 'string', description: 'relevance_desc (default) | created_at_desc | created_at_asc | last_activity_at_desc.' },
+        },
+      },
+    },
+    {
       name: 'rt_get_rating_scale',
       description:
         'The rating scale this company is configured for. Read it BEFORE writing an evaluation: ' +
@@ -345,6 +383,15 @@ async function runServer() {
         if (!args.query) return fail('query is required.');
         const results = await client.searchCandidates({ query: args.query, limit: args.limit });
         return ok({ query: args.query, count: results.length, results });
+      }
+
+      if (name === 'rt_source_candidates') {
+        return ok(await client.sourceCandidates({
+          query: args.query, offer: args.offer, excludeOffer: args.excludeOffer,
+          jobStatus: args.jobStatus, stage: args.stage, status: args.status,
+          tags: args.tags, sources: args.sources,
+          limit: args.limit, page: args.page, sortBy: args.sortBy,
+        }));
       }
 
       if (name === 'rt_get_rating_scale') {

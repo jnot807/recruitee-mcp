@@ -242,6 +242,206 @@ async function searchCandidates({ query, limit = 25 } = {}) {
   }));
 }
 
+// ── Sourcing the existing database ─────────────────────────────────────────
+//
+// The endpoint the Candidates screen itself runs on, which is a different and
+// far more capable thing than /candidates?query= (that one matches names only).
+// This one searches EVERYTHING, CV text included, with boolean operators — so
+// "renewals AND churn" finds people whose resumé says both, wherever it says
+// them. On this tenant that is 23,048 records nobody was otherwise reading.
+//
+// Everything it does goes through `filters_json`: an ARRAY of filter objects in
+// one of three shapes, all three confirmed against counts the UI displays for
+// the same search.
+//
+//   {"field":"all","query":"renewals AND churn"}   full text, boolean, incl. CV
+//   {"field":"status","in":["qualified"]}          bare field, `in` only
+//   {"filter":"jobs","id":{"in":[123]}}            entity, `in` or `not_in`
+//
+// WHY EVERY KEY IS WHITELISTED INSTEAD OF PASSED THROUGH. An unrecognised
+// entity name is SILENTLY IGNORED and the search returns the entire database,
+// which looks exactly like a filter that legitimately matched everyone. `nin`
+// in place of `not_in` does the same, and so does an unknown sort. A wrong
+// VALUE is harmless — it returns 0, which is obviously wrong to anyone reading
+// it — but a wrong FIELD produces a plausible, enormous, silently unfiltered
+// answer. So no caller-supplied key reaches the API: names are mapped onto a
+// vocabulary verified against this API, and anything outside it throws.
+const SOURCE_SORTS = ['relevance_desc', 'created_at_desc', 'created_at_asc', 'last_activity_at_desc'];
+const SOURCE_STATUS = ['qualified', 'disqualified', 'new', 'viewed', 'overdue'];
+const SOURCE_JOB_STATUS = ['published', 'archived'];
+
+const list = (v) => (v == null ? [] : (Array.isArray(v) ? v : [v])).filter((x) => x !== '' && x != null);
+
+// Tags and sources filter BY ID — `{"filter":"tags","name":{...}}` is one of
+// the silently-ignored shapes — but nobody knows a tag by its id, so names are
+// resolved here and an unknown one throws with the real list attached.
+async function resolveNamedIds(kind, wanted) {
+  const want = list(wanted);
+  if (!want.length) return [];
+  const out = await api('GET', `/${kind}`);
+  const all = (out?.[kind] || out || []).filter((x) => x && x.id);
+  const ids = [];
+  for (const w of want) {
+    if (typeof w === 'number' || /^\d+$/.test(String(w))) { ids.push(Number(w)); continue; }
+    const hit = all.filter((x) => String(x.name || '').toLowerCase() === String(w).toLowerCase());
+    if (!hit.length) {
+      throw new RecruiteeError(
+        `No ${kind.replace(/s$/, '')} called "${w}". This company has: ${all.map((x) => x.name).filter(Boolean).sort().join(', ')}.`
+      );
+    }
+    hit.forEach((h) => ids.push(h.id));
+  }
+  return ids;
+}
+
+function oneOf(value, allowed, what) {
+  const v = String(value).toLowerCase();
+  if (!allowed.includes(v)) {
+    throw new RecruiteeError(`"${value}" is not a valid ${what}. Use one of: ${allowed.join(', ')}.`);
+  }
+  return v;
+}
+
+// The snippets come back as HTML: <em> around the matched words, and the
+// surrounding CV text entity-escaped. Both have to come off, or a recruiter
+// reads "Renewals, Saves &amp; Expansion" and the evidence looks like markup.
+function unescapeHighlight(fragment) {
+  return String(fragment)
+    .replace(/<\/?em>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')     // last, so &amp;lt; does not become <
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function sourceCandidates({
+  query, offer, excludeOffer, jobStatus, stage, status, tags, sources,
+  limit = 25, page = 1, sortBy = 'relevance_desc',
+} = {}) {
+  const applied = [];
+  const fielded = [];
+
+  // ONE OBJECT PER ENTITY, ALWAYS. Two filter objects naming the same entity do
+  // NOT combine: the later one replaces the earlier, and nothing says so. Asking
+  // for a role AND a job status as two objects returns everyone with that job
+  // status — 1,410 people instead of 310 — which reads like a working search.
+  // Merged into a single object the same pair is applied properly, so every
+  // constraint on an entity is accumulated here and emitted once.
+  const entities = new Map();
+  const put = (name, attr, op, values) => {
+    const o = entities.get(name) || { filter: name };
+    o[attr] = { ...(o[attr] || {}), [op]: values };
+    entities.set(name, o);
+  };
+
+  if (query && String(query).trim()) {
+    fielded.push({ field: 'all', query: String(query).trim() });
+    applied.push(`text "${String(query).trim()}"`);
+  }
+
+  // Offers are resolved through the same name matcher the writes use, so
+  // "Account Manager" means the same role here as it does everywhere else.
+  const offerIds = [];
+  for (const o of list(offer)) { const r = await resolveOffer(o); offerIds.push(r.id); applied.push(`on "${r.title}"`); }
+  if (offerIds.length) put('jobs', 'id', 'in', offerIds);
+
+  const excludeIds = [];
+  for (const o of list(excludeOffer)) { const r = await resolveOffer(o); excludeIds.push(r.id); applied.push(`NOT already on "${r.title}"`); }
+  if (excludeIds.length) put('jobs', 'id', 'not_in', excludeIds);
+
+  if (jobStatus) {
+    const v = oneOf(jobStatus, SOURCE_JOB_STATUS, 'job status');
+    put('jobs', 'status', 'in', [v]);
+    applied.push(`job status ${v}`);
+  }
+  const stages = list(stage).map(String);
+  if (stages.length) { put('stages', 'name', 'in', stages); applied.push(`stage ${stages.join(' or ')}`); }
+
+  const statuses = list(status).map((s) => oneOf(s, SOURCE_STATUS, 'candidate status'));
+  if (statuses.length) { fielded.push({ field: 'status', in: statuses }); applied.push(`status ${statuses.join(' or ')}`); }
+
+  const tagIds = await resolveNamedIds('tags', tags);
+  if (tagIds.length) { put('tags', 'id', 'in', tagIds); applied.push(`tagged`); }
+  const sourceIds = await resolveNamedIds('sources', sources);
+  if (sourceIds.length) { put('sources', 'id', 'in', sourceIds); applied.push(`from source`); }
+
+  const filters = [...fielded, ...entities.values()];
+
+  const sort = oneOf(sortBy, SOURCE_SORTS, 'sort');
+  const perPage = Math.max(1, Math.min(Number(limit) || 25, 100));
+
+  const out = await api('GET', '/search/new/candidates', {
+    query: {
+      sort_by: sort, page: Math.max(1, Number(page) || 1), limit: perPage,
+      hits: true, highlight: true,
+      filters_json: JSON.stringify(filters),
+      // api() turns an array value into repeated key[]=… — so the key here is
+      // `aggs`, not `aggs[]`, or it goes out as aggs[][] and the server 500s.
+      aggs: ['stages.name.in', 'jobs.status.in', 'status'],
+    },
+  });
+
+  const hits = out?.hits || [];
+  const candidates = hits.map((h) => ({
+    id: h.id,
+    name: h.name,
+    emails: h.emails || [],
+    roles: (h.placements || []).map((p) => ({
+      offerId: p.offer?.id ?? null,
+      title: p.offer?.title ?? null,
+      stage: p.stage?.name ?? null,
+      hired: !!p.is_hired,
+      disqualified: !!p.disqualified,
+      // The reason matters more than the flag: "wrong location" a year ago is
+      // a different signal from "failed the assessment".
+      disqualifyReason: p.disqualify_reason || null,
+    })),
+    tags: (h.tags || []).map((t) => t.name || t).filter(Boolean),
+    sources: (h.sources || []).map((s) => s.name || s).filter(Boolean),
+    createdAt: h.created_at || null,
+    lastActivityAt: h.last_activity_at || null,
+    // WHY THIS PERSON CAME BACK. The snippets are the search engine's own
+    // evidence, and for a CV match they are the only thing separating a real
+    // hit from a coincidence — a recruiter reading "renewals" inside a
+    // sentence about someone else's job can dismiss it in one glance.
+    whyMatched: Object.entries(h.highlight || {}).flatMap(([field, frags]) =>
+      (frags || []).map((f) => ({ field, text: unescapeHighlight(f) }))
+    ).slice(0, 4),
+    profileUrl: `https://app.tellent.com/ats/dashboard/overview?candidate=${h.id}&company=${companyId()}`,
+  }));
+
+  // A zero result is either a genuinely empty search or a value this company
+  // does not use, and those need telling apart before anyone concludes the
+  // database is thin. The aggregations cannot say which: with nothing matched
+  // they come back empty too, so the real stage list is fetched separately —
+  // only on a zero result, and only then.
+  let availableStages;
+  if (!out?.total) {
+    try {
+      const ref = await api('GET', '/search/new/candidates', {
+        query: { page: 1, limit: 1, hits: false, filters_json: '[]', aggs: ['stages.name.in'] },
+      });
+      availableStages = (ref?.aggregations?.['stages.name.in'] || [])
+        .filter((b) => b && b.key && !String(b.key).startsWith('__'))
+        .map((b) => `${b.key} (${b.count})`);
+    } catch { /* an empty result is still the answer; the hint is a bonus */ }
+  }
+
+  return {
+    total: out?.total ?? 0,
+    returned: candidates.length,
+    page: Math.max(1, Number(page) || 1),
+    filtersApplied: applied.length ? applied.join('; ') : 'none — this is the whole database',
+    candidates,
+    ...(availableStages?.length ? { availableStages } : {}),
+    note: (out?.total ?? 0) > candidates.length
+      ? `Showing ${candidates.length} of ${out.total}. Raise limit (max 100) or ask for page ${(Number(page) || 1) + 1}.`
+      : null,
+  };
+}
+
 // ── Evaluations ────────────────────────────────────────────────────────────
 
 // The scale the company is actually configured for. `rating` on a submission
@@ -652,7 +852,7 @@ async function whoami() {
 module.exports = {
   RecruiteeError,
   companyId, readToken, writeToken, readConfig, TOKEN_PATH,
-  listOffers, getStages, offerCandidates, getCandidate, searchCandidates,
+  listOffers, getStages, offerCandidates, getCandidate, searchCandidates, sourceCandidates,
   getRatingScale, getEvaluations, submitEvaluation,
   createCandidate, addNote, getNotes, whoami, toRecruiteeNote,
   resolveOffer, resolveCandidate, resolveStage, uploadAttachment,
