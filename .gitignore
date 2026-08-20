@@ -1,0 +1,6 @@
+# Your personal API token lives here. Never commit it, never send it to anyone.
+session/
+
+node_modules/
+*.log
+.DS_Store
