@@ -129,11 +129,15 @@ the four mistakes above.
 Five minutes, once. You need **Node 18 or newer** (`node -v` to check) and
 **Claude Code** or the **Claude desktop app**.
 
-### 1. Install
+### 1. Get the code and install
 
 ```bash
+git clone https://github.com/jnot807/recruitee-mcp.git
+cd recruitee-mcp
 npm install
 ```
+
+Every command from here runs from inside that folder.
 
 ### 2. Create your own API token
 
