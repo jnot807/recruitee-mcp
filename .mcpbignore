@@ -1,0 +1,7 @@
+.git/
+.gitignore
+session/
+smoke-test.js
+sourcing-test.js
+*.mcpb
+.DS_Store

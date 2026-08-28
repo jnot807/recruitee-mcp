@@ -1,0 +1,64 @@
+{
+  "manifest_version": "0.2",
+  "name": "recruitee-mcp",
+  "display_name": "Recruitee",
+  "version": "1.0.0",
+  "description": "Search, read and write your Recruitee / Tellent ATS from Claude, using your own personal API token.",
+  "long_description": "Reads offers, pipeline stages and candidates scoped correctly per offer, searches the whole candidate database including CV text, creates candidates onto a role, moves them along a pipeline, and writes interview evaluations and notes.\n\nEverything is filed under YOUR name, because it runs on your own personal Recruitee API token rather than a shared one. There are no destructive tools: nothing here deletes a candidate, disqualifies anyone, or alters an offer.",
+  "author": {
+    "name": "Jason Nottage",
+    "url": "https://github.com/jnot807"
+  },
+  "homepage": "https://github.com/jnot807/recruitee-mcp",
+  "documentation": "https://github.com/jnot807/recruitee-mcp#readme",
+  "support": "https://github.com/jnot807/recruitee-mcp/issues",
+  "license": "MIT",
+  "keywords": ["recruitee", "tellent", "ats", "recruiting", "hiring", "candidates"],
+  "server": {
+    "type": "node",
+    "entry_point": "server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server.js"],
+      "env": {
+        "RECRUITEE_API_TOKEN": "${user_config.api_token}",
+        "RECRUITEE_COMPANY_ID": "${user_config.company_id}"
+      }
+    }
+  },
+  "user_config": {
+    "api_token": {
+      "type": "string",
+      "title": "Recruitee personal API token",
+      "description": "Recruitee → Settings → Apps and plugins → API tokens → Personal API tokens → + Add token. It is shown once, so copy it straight in. Use your OWN token, never a shared one: a Recruitee token acts as the person who created it, so an evaluation written with it appears under your name.",
+      "sensitive": true,
+      "required": true
+    },
+    "company_id": {
+      "type": "string",
+      "title": "Company ID or subdomain",
+      "description": "On the same screen as the token, in the \"Current company details\" panel at the top. Either the numeric ID (e.g. 12345) or the subdomain (e.g. acme) works.",
+      "sensitive": false,
+      "required": true
+    }
+  },
+  "tools": [
+    { "name": "rt_list_offers", "description": "List the open roles (offers) on the account." },
+    { "name": "rt_get_stages", "description": "Read one offer's pipeline stages, in order." },
+    { "name": "rt_offer_candidates", "description": "List the candidates on one offer, scoped to that offer." },
+    { "name": "rt_search_candidates", "description": "Find candidates by name or keyword across the company." },
+    { "name": "rt_source_candidates", "description": "Search the whole candidate database, CV text included, to find people already in the ATS who fit a role." },
+    { "name": "rt_get_candidate", "description": "Read one candidate's full record." },
+    { "name": "rt_create_candidate", "description": "Create a candidate onto a role." },
+    { "name": "rt_set_stage", "description": "Move a candidate along an offer's pipeline." },
+    { "name": "rt_attach_file", "description": "Attach a file to a candidate." },
+    { "name": "rt_get_rating_scale", "description": "Read the account's evaluation rating scale." },
+    { "name": "rt_get_evaluations", "description": "Read the interview evaluations on a candidate." },
+    { "name": "rt_submit_evaluation", "description": "Write an interview evaluation onto a candidate." },
+    { "name": "rt_get_notes", "description": "Read the notes on a candidate." },
+    { "name": "rt_add_note", "description": "Add a note to a candidate." }
+  ],
+  "compatibility": {
+    "runtimes": { "node": ">=18.0.0" }
+  }
+}
