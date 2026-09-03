@@ -80,6 +80,25 @@ async function main() {
         'a candidate can sit on several pipelines; moving "them" must name which');
     }
 
+    // Contact details are stored as ARRAYS and a write sends the whole array,
+    // so the naive implementation of this tool silently deletes every address
+    // already on file. Assert the append at the source, the same way the
+    // disqualification refusal is asserted — a description promising it is not
+    // evidence the code does it.
+    const contact = tools.find((t) => t.name === 'rt_set_candidate_contact');
+    if (contact) {
+      const clientSrc = require('node:fs').readFileSync(path.join(__dirname, 'client.js'), 'utf8');
+      check('contact writes append rather than replace',
+        /async function setCandidateContact[\s\S]{0,3000}?getCandidate\(candidateId\)/.test(clientSrc),
+        'client.setCandidateContact must read the record before it PATCHes');
+      check('contact replace is opt-in',
+        contact.inputSchema?.properties?.replace && !(contact.inputSchema?.required || []).includes('replace'),
+        'replace must exist and default to off');
+      check('contact writes record their provenance',
+        !!contact.inputSchema?.properties?.foundIn,
+        'foundIn tells a recruiter where an address came from before they send to it');
+    }
+
     // Every write must advertise the two-call gate. Derived from the schema —
     // a name-pattern list silently stops covering each new write tool.
     const READS = /^rt_(list_offers|get_stages|offer_candidates|get_candidate|search_candidates|source_candidates|get_rating_scale|get_evaluations|get_notes)$/;

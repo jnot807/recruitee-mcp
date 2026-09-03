@@ -917,6 +917,95 @@ async function uploadAttachment({ candidateId, filePath, asCv = false, replaceCv
 
 // ── Notes ──────────────────────────────────────────────────────────────────
 
+// ── Contact details ────────────────────────────────────────────────────────
+
+// Add an email address or phone number to an existing candidate.
+//
+// ADDITIVE, NOT A REPLACE. Recruitee stores both as ARRAYS, and a PATCH sends
+// the whole array — so writing ["new@example.com"] silently deletes every
+// address already on file. This reads the record first and appends, and only
+// replaces when the caller has explicitly said to. Email comparison is
+// case-insensitive because Recruitee will happily store two casings of the
+// same address as two contacts.
+async function setCandidateContact({ candidateId, email, phone, replace = false }) {
+  const before = await getCandidate(candidateId);
+
+  const norm = (v) => String(v).trim();
+  const sameEmail = (a, b) => norm(a).toLowerCase() === norm(b).toLowerCase();
+  // Compare phones on digits alone: "+1 (555) 010-9999" and "15550109999" are
+  // one number, and storing both makes the record look like two people.
+  const digits = (v) => String(v).replace(/\D+/g, '');
+  const samePhone = (a, b) => digits(a).length > 0 && digits(a) === digits(b);
+
+  const emails = [...(before.emails || [])];
+  const phones = [...(before.phones || [])];
+  const added = [], alreadyOnFile = [], removed = [];
+
+  if (email) {
+    const e = norm(email);
+    if (replace) {
+      removed.push(...emails.filter((x) => !sameEmail(x, e)));
+      emails.length = 0;
+      emails.push(e);
+      added.push(e);
+    } else if (emails.some((x) => sameEmail(x, e))) {
+      alreadyOnFile.push(e);
+    } else {
+      emails.push(e);
+      added.push(e);
+    }
+  }
+
+  if (phone) {
+    const p = norm(phone);
+    if (replace) {
+      removed.push(...phones.filter((x) => !samePhone(x, p)));
+      phones.length = 0;
+      phones.push(p);
+      added.push(p);
+    } else if (phones.some((x) => samePhone(x, p))) {
+      alreadyOnFile.push(p);
+    } else {
+      phones.push(p);
+      added.push(p);
+    }
+  }
+
+  if (!added.length) {
+    return {
+      id: before.id, name: before.name, unchanged: true,
+      emails: before.emails || [], phones: before.phones || [],
+      alreadyOnFile,
+    };
+  }
+
+  await api('PATCH', `/candidates/${Number(candidateId)}`, {
+    body: { candidate: { emails, phones } },
+  });
+
+  // Re-read rather than trusting the response, the same way a stage move is
+  // verified — a 200 from this endpoint is not proof the field took.
+  const after = await getCandidate(candidateId);
+  const landed = (v, list, eq) => list.some((x) => eq(x, v));
+  const notLanded = added.filter((v) =>
+    v.includes('@')
+      ? !landed(v, after.emails || [], sameEmail)
+      : !landed(v, after.phones || [], samePhone)
+  );
+
+  return {
+    id: after.id,
+    name: after.name,
+    emails: after.emails || [],
+    phones: after.phones || [],
+    added,
+    alreadyOnFile,
+    ...(removed.length ? { removed } : {}),
+    verified: notLanded.length === 0,
+    ...(notLanded.length ? { notLanded } : {}),
+  };
+}
+
 async function addNote({ candidateId, body, visibility = 'public' }) {
   const out = await api('POST', `/candidates/${Number(candidateId)}/notes`, {
     body: { note: { body, visibility: { level: visibility } } },
@@ -951,5 +1040,6 @@ module.exports = {
   listOffers, getStages, offerCandidates, getCandidate, searchCandidates, sourceCandidates,
   getRatingScale, getEvaluations, submitEvaluation,
   createCandidate, moveStage, addNote, getNotes, whoami, toRecruiteeNote,
+  setCandidateContact,
   resolveOffer, resolveCandidate, resolveStage, uploadAttachment,
 };
