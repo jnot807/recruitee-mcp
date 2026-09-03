@@ -56,7 +56,8 @@
     { "name": "rt_get_evaluations", "description": "Read the interview evaluations on a candidate." },
     { "name": "rt_submit_evaluation", "description": "Write an interview evaluation onto a candidate." },
     { "name": "rt_get_notes", "description": "Read the notes on a candidate." },
-    { "name": "rt_add_note", "description": "Add a note to a candidate." }
+    { "name": "rt_add_note", "description": "Add a note to a candidate." },
+    { "name": "rt_set_candidate_contact", "description": "Add an email address or phone number to a candidate already in the ATS. Appends rather than replacing what is on file." }
   ],
   "compatibility": {
     "runtimes": { "node": ">=18.0.0" }

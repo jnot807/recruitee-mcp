@@ -42,6 +42,7 @@ question three times, and a flat list cannot tell those answers apart.
 | `rt_set_stage` | Moves a candidate to another stage on one of their offers. Refuses a disqualified placement, so it cannot requalify anybody. |
 | `rt_attach_file` | Attaches a local file to an existing candidate, optionally making it their CV. |
 | `rt_add_note` | Adds a note, public or private. For context that is not a verdict — a call recap, sourcing rationale, a summary. |
+| `rt_set_candidate_contact` | Adds an email address or phone number to someone already in the ATS — the common case of a record created without one. **Appends:** Recruitee stores these as arrays and a write sends the whole array, so the naive version silently deletes what is on file. `replace` is opt-in and the preview lists what it would drop. |
 
 ### How the writes behave
 

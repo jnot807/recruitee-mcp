@@ -371,6 +371,39 @@ async function runServer() {
         required: ['candidate', 'body'],
       },
     },
+    {
+      name: 'rt_set_candidate_contact',
+      description:
+        'Add an email address or phone number to a candidate who is ALREADY in Tellent. ' +
+        'rt_create_candidate takes contact details too, but only at creation — this is the tool ' +
+        'for the far more common case of a record that was created without them and has since ' +
+        'been in touch. A candidate with no email cannot be contacted from the ATS at all.\n\n' +
+        'ONLY SUBMIT A VALUE YOU ACTUALLY FOUND IN A REAL SOURCE — a calendar invite they accepted, ' +
+        'a booking confirmation, an email they sent, their own site or bio. NEVER guess an address ' +
+        'or build one from a name-and-domain pattern: a bounce damages the team\'s sending ' +
+        'reputation, and a plausible wrong address is worse than an empty field because nobody ' +
+        'checks it. Pass `foundIn` saying where it came from; it is recorded so a recruiter can ' +
+        'check before sending.\n\n' +
+        'ADDITIVE BY DEFAULT. Recruitee stores emails and phones as arrays and a write sends the ' +
+        'whole array, so this reads the record first and APPENDS. A value already on file is ' +
+        'reported and changes nothing. `replace: true` drops every other value on that field and ' +
+        'is only for correcting one that is actually wrong — the preview lists exactly what would ' +
+        'be lost.\n\n' +
+        'Two-call gate: preview, then confirm. The write is verified by re-reading the candidate; ' +
+        'if it did not land, that is reported rather than claimed as done.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          candidate: { type: 'string', description: 'Full name, or a candidate id.' },
+          email: { type: 'string', description: 'Email address found in a real source (omit if you have none).' },
+          phone: { type: 'string', description: 'Phone number found in a real source (omit if you have none).' },
+          foundIn: { type: 'string', description: 'Where you found it, e.g. "Calendly booking confirmation, 1 Sep 2026" or a URL. Recorded for provenance.' },
+          replace: { type: 'boolean', description: 'Drop the other values on that field. Default false — normally you are adding, not correcting.' },
+          confirm: { type: 'boolean', description: 'False/absent = preview only.' },
+        },
+        required: ['candidate'],
+      },
+    },
   ];
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -653,6 +686,57 @@ async function runServer() {
           candidateId: cand.id, body: args.body, visibility: args.visibility || 'public',
         });
         return ok({ status: 'written', candidate: cand.name, note });
+      }
+
+      if (name === 'rt_set_candidate_contact') {
+        if (!String(args.candidate || '').trim()) return fail('candidate is required.');
+        const email = String(args.email || '').trim();
+        const phone = String(args.phone || '').trim();
+        if (!email && !phone) return fail('Pass an email, a phone, or both — there is nothing to write otherwise.');
+        // Cheap shape check only. It cannot tell a real address from a
+        // well-formed invented one, which is why the description carries the
+        // rule; this just stops a typo becoming a permanent bad contact.
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return fail(`"${email}" is not a valid email address.`);
+        }
+        if (!String(args.foundIn || '').trim()) {
+          return fail('foundIn is required — say where this came from, so a recruiter can check it before sending.');
+        }
+
+        const cand = await client.resolveCandidate(args.candidate);
+        const replace = args.replace === true;
+
+        if (args.confirm !== true) {
+          const onFile = { emails: cand.emails || [], phones: cand.phones || [] };
+          const dupEmail = email && onFile.emails.some((x) => String(x).trim().toLowerCase() === email.toLowerCase());
+          const digits = (v) => String(v).replace(/\D+/g, '');
+          const dupPhone = phone && onFile.phones.some((x) => digits(x) && digits(x) === digits(phone));
+          const wouldLose = replace
+            ? [
+                ...(email ? onFile.emails.filter((x) => String(x).trim().toLowerCase() !== email.toLowerCase()) : []),
+                ...(phone ? onFile.phones.filter((x) => digits(x) !== digits(phone)) : []),
+              ]
+            : [];
+          return staged('contact detail', {
+            candidate: `${cand.name} (${cand.id})`,
+            onFile,
+            ...(email ? { addEmail: email } : {}),
+            ...(phone ? { addPhone: phone } : {}),
+            foundIn: args.foundIn,
+            mode: replace ? 'replace' : 'append',
+            ...(wouldLose.length ? { wouldRemove: wouldLose, warning: 'replace: true DELETES these. Only confirm if they are actually wrong.' } : {}),
+            ...(dupEmail || dupPhone ? { note: 'Already on file — confirming would change nothing.' } : {}),
+          });
+        }
+
+        const res = await client.setCandidateContact({
+          candidateId: cand.id, email: email || undefined, phone: phone || undefined, replace,
+        });
+        return ok({
+          status: res.unchanged ? 'unchanged' : (res.verified ? 'written' : 'write_unverified'),
+          foundIn: args.foundIn,
+          ...res,
+        });
       }
 
       return fail(`Unknown tool: ${name}`);
